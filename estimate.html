@@ -503,30 +503,18 @@
        CONFIGURATION — EDIT HERE
        ================================================================
 
-       1) GOOGLE MAPS (recommended)
-          Create an API key at https://console.cloud.google.com, enable the
-          "Maps JavaScript API" and "Places API", then paste it below.
-          For the deployed site this is injected from the client JSON config
-          key `roof_estimator_map_key` (see scripts/generate-site.js).
+       1) MAP — LEAFLET + OPENSTREETMAP (the only provider — no key needed)
+          The estimator uses Leaflet with free Esri World Imagery satellite
+          tiles and Nominatim address search. No account, no API key, no cost.
 
-       2) MAPBOX (alternative — use one OR the other)
-          Paste a public token from https://account.mapbox.com.
-
-       3) LEAFLET + OPENSTREETMAP (default — no key required)
-          When neither map key above is set, the estimator uses Leaflet with
-          free Esri World Imagery satellite tiles and Nominatim address
-          search. No account, no API key, no cost — works out of the box.
-
-       4) LEAD WEBHOOK / CRM
+       2) LEAD WEBHOOK / CRM
           Where the step-5 form POSTs as JSON. Defaults to the site's Google
           Apps Script endpoint; override per-client with `roof_estimator_webhook`.
           Leave empty to skip the network call (summary still shows locally).
 
-       Map fallback order: Google > Mapbox > Leaflet > built-in DEMO grid
-       (demo only appears if the Leaflet CDN can't load, e.g. fully offline).
+       If the Leaflet CDN can't load (e.g. fully offline), the estimator
+       falls back to a built-in DEMO grid so the flow still works.
     ================================================================ */
-    var GOOGLE_MAPS_KEY = "";
-    var MAPBOX_TOKEN    = "";
     var LEAD_WEBHOOK    = "";
     var BUSINESS_NAME   = "Red Oak Roofing Co.";
     var PHONE           = "(214) 555-0184";
@@ -599,102 +587,6 @@
        mapApi.onVertices(vertices, closed) whenever the drawing changes.
     ================================================================ */
 
-    /* ---------- Google Maps (hybrid satellite by default) ---------- */
-    function GoogleMapProvider(el) {
-      var map = new google.maps.Map(el, {
-        center: DEFAULT_CENTER, zoom: DEFAULT_ZOOM, mapTypeId: 'hybrid',
-        gestureHandling: 'cooperative', disableDoubleClickZoom: true,
-        mapTypeControl: true, fullscreenControl: false, streetViewControl: false
-      });
-      var verts = [], markers = [], line = null, poly = null, mode = 'idle';
-      var self = this;
-      function redraw(closed) {
-        if (line) { line.setMap(null); line = null; }
-        if (poly) { poly.setMap(null); poly = null; }
-        if (verts.length > 1) {
-          line = new google.maps.Polyline({ path: verts.slice(), map: map, strokeColor: '#dd5a2a', strokeWeight: 3, strokeDasharray: closed ? null : '8 6' });
-        }
-        if (closed && verts.length >= 3) {
-          poly = new google.maps.Polygon({ path: verts.slice(), map: map, fillColor: '#dd5a2a', fillOpacity: 0.3, strokeColor: '#c2471f', strokeWeight: 3 });
-          markers.forEach(function (m) { m.setMap(null); }); markers = [];
-        }
-        self.onVertices(verts.slice(), closed);
-      }
-      map.addListener('click', function (e) {
-        if (mode !== 'draw') return;
-        verts.push({ lat: e.latLng.lat(), lng: e.latLng.lng() });
-        var m = new google.maps.Marker({ position: e.latLng, map: map, draggable: true, label: String(verts.length) });
-        markers.push(m);
-        m.addListener('dragend', function () {
-          verts[markers.indexOf(m)] = { lat: m.getPosition().lat(), lng: m.getPosition().lng() };
-          redraw(false);
-        });
-        redraw(false);
-      });
-      map.addListener('dblclick', function (e) {
-        e.stop();
-        if (mode === 'draw' && verts.length >= 3) { mode = 'idle'; redraw(true); }
-      });
-      this.startDraw = function () { verts = []; markers.forEach(function (m) { m.setMap(null); }); markers = []; mode = 'draw'; redraw(false); };
-      this.finish = function () { if (mode === 'draw' && verts.length >= 3) { mode = 'idle'; redraw(true); } };
-      this.undo = function () { if (!verts.length) return; verts.pop(); var m = markers.pop(); if (m) m.setMap(null); redraw(false); };
-      this.clear = function () { verts = []; markers.forEach(function (m) { m.setMap(null); }); markers = []; mode = 'idle'; redraw(false); };
-      this.getVertices = function () { return verts.slice(); };
-      this.areaFt2 = function (v) { return sphAreaM2(v) * 10.7639; };
-      this.disarm = function () { mode = 'idle'; };
-      this.flyTo = function (lat, lng) { map.panTo({ lat: lat, lng: lng }); map.setZoom(19); };
-    }
-
-    /* ---------- Mapbox GL (satellite-v9) ---------- */
-    function MapboxProvider(el) {
-      mapboxgl.accessToken = MAPBOX_TOKEN;
-      var map = new mapboxgl.Map({
-        container: el, style: 'mapbox://styles/mapbox/satellite-v9',
-        center: [DEFAULT_CENTER.lng, DEFAULT_CENTER.lat], zoom: DEFAULT_ZOOM,
-        attributionControl: false
-      });
-      map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-right');
-      map.addControl(new mapboxgl.AttributionControl({ compact: true }));
-      map.doubleClickZoom.disable();
-      var verts = [], markers = [], mode = 'idle', closed = false;
-      var self = this;
-      function geo() {
-        var feats = [];
-        if (verts.length > 1 && !closed) feats.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: verts.map(function (v) { return [v.lng, v.lat]; }) } });
-        if (closed && verts.length >= 3) feats.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: [verts.map(function (v) { return [v.lng, v.lat]; })] } });
-        return { type: 'FeatureCollection', features: feats };
-      }
-      function update() {
-        var src = map.getSource('re-draw');
-        if (src) src.setData(geo());
-        self.onVertices(verts.slice(), closed);
-      }
-      map.on('load', function () {
-        map.addSource('re-draw', { type: 'geojson', data: geo() });
-        map.addLayer({ id: 're-fill', type: 'fill', source: 're-draw', paint: { 'fill-color': '#dd5a2a', 'fill-opacity': 0.3 }, filter: ['==', '$type', 'Polygon'] });
-        map.addLayer({ id: 're-line', type: 'line', source: 're-draw', paint: { 'line-color': '#dd5a2a', 'line-width': 3 }, filter: ['==', '$type', 'LineString'] });
-      });
-      map.on('click', function (e) {
-        if (mode !== 'draw') return;
-        var ll = e.lngLat;
-        verts.push({ lat: ll.lat, lng: ll.lng });
-        markers.push(new mapboxgl.Marker({ color: '#dd5a2a' }).setLngLat([ll.lng, ll.lat]).addTo(map));
-        update();
-      });
-      map.on('dblclick', function (e) {
-        e.preventDefault();
-        if (mode === 'draw' && verts.length >= 3) { closed = true; mode = 'idle'; update(); }
-      });
-      this.startDraw = function () { verts = []; closed = false; markers.forEach(function (m) { m.remove(); }); markers = []; mode = 'draw'; update(); };
-      this.finish = function () { if (mode === 'draw' && verts.length >= 3) { closed = true; mode = 'idle'; update(); } };
-      this.undo = function () { if (!verts.length) return; verts.pop(); var m = markers.pop(); if (m) m.remove(); update(); };
-      this.clear = function () { verts = []; closed = false; markers.forEach(function (m) { m.remove(); }); markers = []; mode = 'idle'; update(); };
-      this.getVertices = function () { return verts.slice(); };
-      this.areaFt2 = function (v) { return sphAreaM2(v) * 10.7639; };
-      this.disarm = function () { mode = 'idle'; };
-      this.flyTo = function (lat, lng) { map.flyTo({ center: [lng, lat], zoom: 19 }); };
-    }
-
     /* ---------- Leaflet + OpenStreetMap (no API key — free) ---------- */
     function LeafletProvider(el) {
       var map = L.map(el, {
@@ -757,7 +649,7 @@
       el.appendChild(svg);
       var label = document.createElement('div');
       label.className = 're-demo-label';
-      label.textContent = 'DEMO MODE — add a map API key for satellite imagery';
+      label.textContent = 'OFFLINE MODE — could not load the map tiles';
       el.appendChild(label);
       var verts = [], mode = 'idle', closed = false;
       var self = this;
@@ -801,11 +693,6 @@
     /* ================================================================
        PROVIDER BOOTSTRAP + SEARCH
     ================================================================ */
-    function pickProvider() {
-      if (GOOGLE_MAPS_KEY) return 'google';
-      if (MAPBOX_TOKEN) return 'mapbox';
-      return 'leaflet';
-    }
     function showDemoNote(msg) {
       var n = $('#re-map-demo-note');
       if (!n) return;
@@ -822,56 +709,9 @@
       };
       var input = $('#re-address');
       function onPlace(lat, lng, label) { state.address = label; input.value = label; if (api.flyTo) api.flyTo(lat, lng); }
-      var search;
-      if (provider === 'google') search = googleSearch(input, onPlace).search;
-      else if (provider === 'mapbox') search = mapboxSearch(input, onPlace).search;
-      else if (provider === 'leaflet') search = nominatimSearch(input, onPlace).search;
-      else search = function () { showDemoNote('Address search needs a Google Maps, Mapbox, or Leaflet provider.'); };
+      var search = nominatimSearch(input, onPlace).search;
       $('#re-search-btn').onclick = function () { if (search) search(); };
-      if (provider === 'demo') showDemoNote('The map CDN could not load — running in offline DEMO mode. Add a Google Maps or Mapbox API key (see the config block at the top of this script) for full satellite tracing.');
-    }
-    function googleSearch(input, onPlace) {
-      var autocomplete = new google.maps.places.Autocomplete(input, { fields: ['geometry', 'formatted_address', 'name'] });
-      autocomplete.addListener('place_changed', function () {
-        var p = autocomplete.getPlace();
-        if (p && p.geometry) onPlace(p.geometry.location.lat(), p.geometry.location.lng(), p.formatted_address || p.name || input.value);
-      });
-      var geocoder = new google.maps.Geocoder();
-      function doGeocode() {
-        var q = input.value.trim(); if (!q) return;
-        geocoder.geocode({ address: q }, function (res, status) {
-          if (status === 'OK' && res && res[0]) onPlace(res[0].geometry.location.lat(), res[0].geometry.location.lng(), res[0].formatted_address);
-        });
-      }
-      input.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); doGeocode(); } });
-      return { search: doGeocode };
-    }
-    function mapboxSearch(input, onPlace) {
-      var list = document.createElement('div'); list.className = 're-geo-list'; list.hidden = true;
-      input.parentNode.appendChild(list);
-      var timer = null;
-      input.addEventListener('input', function () {
-        clearTimeout(timer);
-        var q = input.value.trim();
-        if (q.length < 3) { list.hidden = true; return; }
-        timer = setTimeout(function () {
-          fetch('https://api.mapbox.com/geocoding/v5/mapbox.places/' + encodeURIComponent(q) + '.json?access_token=' + MAPBOX_TOKEN + '&limit=5')
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
-              var feats = (data && data.features) || [];
-              list.innerHTML = '';
-              feats.forEach(function (f) {
-                var b = document.createElement('button');
-                b.type = 'button'; b.className = 're-geo-item'; b.textContent = f.place_name;
-                b.addEventListener('click', function () { list.hidden = true; input.value = f.place_name; onPlace(f.center[1], f.center[0], f.place_name); });
-                list.appendChild(b);
-              });
-              list.hidden = feats.length === 0;
-            }).catch(function () { list.hidden = true; });
-        }, 350);
-      });
-      document.addEventListener('click', function (e) { if (e.target !== input && !input.contains(e.target)) list.hidden = true; });
-      return { search: function () { var first = list.querySelector('.re-geo-item'); if (first) first.click(); } };
+      if (provider === 'demo') showDemoNote('The map CDN could not load — running in offline mode. Reconnect to the internet and refresh to use the satellite map.');
     }
     function nominatimSearch(input, onPlace) {
       var list = document.createElement('div'); list.className = 're-geo-list'; list.hidden = true;
@@ -899,29 +739,6 @@
       document.addEventListener('click', function (e) { if (e.target !== input && !input.contains(e.target)) list.hidden = true; });
       return { search: function () { var first = list.querySelector('.re-geo-item'); if (first) first.click(); } };
     }
-    function loadGoogleMap(el) {
-      if (window.google && window.google.maps) { wireProvider(new GoogleMapProvider(el)); return; }
-      if (window.__reGoogleLoading) return;
-      window.__reGoogleLoading = true;
-      window.__reGoogleReady = function () { wireProvider(new GoogleMapProvider(el)); };
-      var s = document.createElement('script');
-      s.src = 'https://maps.googleapis.com/maps/api/js?key=' + GOOGLE_MAPS_KEY + '&libraries=places&callback=__reGoogleReady';
-      s.async = true; s.defer = true;
-      document.head.appendChild(s);
-    }
-    function loadMapbox(el) {
-      function create() { wireProvider(new MapboxProvider(el)); }
-      if (window.mapboxgl) { create(); return; }
-      if (window.__reMapboxLoading) return;
-      window.__reMapboxLoading = true;
-      var l = document.createElement('link');
-      l.rel = 'stylesheet'; l.href = 'https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.css';
-      document.head.appendChild(l);
-      var s = document.createElement('script');
-      s.src = 'https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.js';
-      s.onload = create; s.async = true; s.defer = true;
-      document.head.appendChild(s);
-    }
     function loadLeaflet(el) {
       function create() { wireProvider(new LeafletProvider(el)); }
       if (window.L) { create(); return; }
@@ -938,12 +755,8 @@
       document.head.appendChild(s);
     }
     function initProvider() {
-      provider = pickProvider();
-      var el = $('#re-map');
-      if (provider === 'google') loadGoogleMap(el);
-      else if (provider === 'mapbox') loadMapbox(el);
-      else if (provider === 'leaflet') loadLeaflet(el);
-      else wireProvider(new DemoProvider(el));
+      provider = 'leaflet';
+      loadLeaflet($('#re-map'));
       setDrawControls();
     }
 
