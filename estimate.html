@@ -106,7 +106,7 @@
   .re-search input:focus{border-color:var(--re-brand);box-shadow:0 0 0 3px rgba(221,90,42,.15)}
   .re-search button{padding:0 18px;background:var(--re-brand);color:#fff;border:0;border-radius:10px;font-weight:700;cursor:pointer;transition:background .2s}
   .re-search button:hover{background:var(--re-brand-d)}
-  .re-geo-list{position:absolute;top:calc(100% + 4px);left:0;right:64px;z-index:20;background:#fff;border:1px solid var(--re-line);border-radius:10px;box-shadow:0 14px 30px -10px rgba(15,23,42,.25);max-height:220px;overflow:auto}
+  .re-geo-list{position:absolute;top:calc(100% + 4px);left:0;right:64px;z-index:1000;background:#fff;border:1px solid var(--re-line);border-radius:10px;box-shadow:0 14px 30px -10px rgba(15,23,42,.25);max-height:220px;overflow:auto}
   .re-geo-item{display:block;width:100%;text-align:left;padding:10px 14px;border:0;background:#fff;font:inherit;font-size:.85rem;color:var(--re-body);cursor:pointer;border-bottom:1px solid var(--re-soft)}
   .re-geo-item:last-child{border-bottom:0}
   .re-geo-item:hover{background:var(--re-soft)}
@@ -512,13 +512,18 @@
        2) MAPBOX (alternative — use one OR the other)
           Paste a public token from https://account.mapbox.com.
 
-       3) LEAD WEBHOOK / CRM
+       3) LEAFLET + OPENSTREETMAP (default — no key required)
+          When neither map key above is set, the estimator uses Leaflet with
+          free Esri World Imagery satellite tiles and Nominatim address
+          search. No account, no API key, no cost — works out of the box.
+
+       4) LEAD WEBHOOK / CRM
           Where the step-5 form POSTs as JSON. Defaults to the site's Google
           Apps Script endpoint; override per-client with `roof_estimator_webhook`.
           Leave empty to skip the network call (summary still shows locally).
 
-       If neither map key is set, the estimator runs in built-in DEMO mode so
-       the full flow still works on the static site.
+       Map fallback order: Google > Mapbox > Leaflet > built-in DEMO grid
+       (demo only appears if the Leaflet CDN can't load, e.g. fully offline).
     ================================================================ */
     var GOOGLE_MAPS_KEY = "";
     var MAPBOX_TOKEN    = "";
@@ -690,7 +695,59 @@
       this.flyTo = function (lat, lng) { map.flyTo({ center: [lng, lat], zoom: 19 }); };
     }
 
-    /* ---------- Demo (no API key — abstract grid) ---------- */
+    /* ---------- Leaflet + OpenStreetMap (no API key — free) ---------- */
+    function LeafletProvider(el) {
+      var map = L.map(el, {
+        center: [DEFAULT_CENTER.lat, DEFAULT_CENTER.lng], zoom: DEFAULT_ZOOM,
+        zoomControl: true, attributionControl: true
+      });
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        attribution: 'Imagery &copy; Esri &mdash; Esri, Maxar, Earthstar Geographics',
+        maxZoom: 19
+      }).addTo(map);
+      map.doubleClickZoom.disable();
+      var verts = [], markers = [], line = null, poly = null, mode = 'idle', closed = false;
+      var self = this;
+      function toLL(v) { return [v.lat, v.lng]; }
+      function redraw() {
+        if (line) { map.removeLayer(line); line = null; }
+        if (poly) { map.removeLayer(poly); poly = null; }
+        if (verts.length > 1) {
+          line = L.polyline(verts.map(toLL), { color: '#dd5a2a', weight: 3, dashArray: closed ? null : '8 6' }).addTo(map);
+        }
+        if (closed && verts.length >= 3) {
+          poly = L.polygon(verts.map(toLL), { color: '#c2471f', weight: 3, fillColor: '#dd5a2a', fillOpacity: 0.3 }).addTo(map);
+          markers.forEach(function (m) { map.removeLayer(m); }); markers = [];
+        }
+        self.onVertices(verts.slice(), closed);
+      }
+      map.on('click', function (e) {
+        if (mode !== 'draw') return;
+        var v = { lat: e.latlng.lat, lng: e.latlng.lng };
+        verts.push(v);
+        var m = L.marker([v.lat, v.lng], { draggable: true, title: String(verts.length) }).addTo(map);
+        markers.push(m);
+        m.on('dragend', function () {
+          var ll = m.getLatLng();
+          verts[markers.indexOf(m)] = { lat: ll.lat, lng: ll.lng };
+          redraw();
+        });
+        redraw();
+      });
+      map.on('dblclick', function (e) {
+        if (mode === 'draw' && verts.length >= 3) { closed = true; mode = 'idle'; redraw(); }
+      });
+      this.startDraw = function () { verts = []; closed = false; markers.forEach(function (m) { map.removeLayer(m); }); markers = []; mode = 'draw'; redraw(); };
+      this.finish = function () { if (mode === 'draw' && verts.length >= 3) { closed = true; mode = 'idle'; redraw(); } };
+      this.undo = function () { if (!verts.length) return; verts.pop(); var m = markers.pop(); if (m) map.removeLayer(m); redraw(); };
+      this.clear = function () { verts = []; closed = false; markers.forEach(function (m) { map.removeLayer(m); }); markers = []; mode = 'idle'; redraw(); };
+      this.getVertices = function () { return verts.slice(); };
+      this.areaFt2 = function (v) { return sphAreaM2(v) * 10.7639; };
+      this.disarm = function () { mode = 'idle'; };
+      this.flyTo = function (lat, lng) { map.setView([lat, lng], 19); };
+    }
+
+    /* ---------- Demo (offline fallback — abstract grid) ---------- */
     function DemoProvider(el) {
       el.classList.add('re-demo');
       var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -747,7 +804,7 @@
     function pickProvider() {
       if (GOOGLE_MAPS_KEY) return 'google';
       if (MAPBOX_TOKEN) return 'mapbox';
-      return 'demo';
+      return 'leaflet';
     }
     function showDemoNote(msg) {
       var n = $('#re-map-demo-note');
@@ -768,9 +825,10 @@
       var search;
       if (provider === 'google') search = googleSearch(input, onPlace).search;
       else if (provider === 'mapbox') search = mapboxSearch(input, onPlace).search;
-      else search = function () { showDemoNote('Address search needs a Google Maps or Mapbox API key.'); };
+      else if (provider === 'leaflet') search = nominatimSearch(input, onPlace).search;
+      else search = function () { showDemoNote('Address search needs a Google Maps, Mapbox, or Leaflet provider.'); };
       $('#re-search-btn').onclick = function () { if (search) search(); };
-      if (provider === 'demo') showDemoNote('Satellite map is in DEMO mode — add a Google Maps API key (see the config block at the top of this script) to outline a real roof.');
+      if (provider === 'demo') showDemoNote('The map CDN could not load — running in offline DEMO mode. Add a Google Maps or Mapbox API key (see the config block at the top of this script) for full satellite tracing.');
     }
     function googleSearch(input, onPlace) {
       var autocomplete = new google.maps.places.Autocomplete(input, { fields: ['geometry', 'formatted_address', 'name'] });
@@ -815,6 +873,32 @@
       document.addEventListener('click', function (e) { if (e.target !== input && !input.contains(e.target)) list.hidden = true; });
       return { search: function () { var first = list.querySelector('.re-geo-item'); if (first) first.click(); } };
     }
+    function nominatimSearch(input, onPlace) {
+      var list = document.createElement('div'); list.className = 're-geo-list'; list.hidden = true;
+      input.parentNode.appendChild(list);
+      var timer = null;
+      input.addEventListener('input', function () {
+        clearTimeout(timer);
+        var q = input.value.trim();
+        if (q.length < 3) { list.hidden = true; return; }
+        timer = setTimeout(function () {
+          fetch('https://nominatim.openstreetmap.org/search?format=json&limit=5&q=' + encodeURIComponent(q))
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+              list.innerHTML = '';
+              (data || []).forEach(function (f) {
+                var b = document.createElement('button');
+                b.type = 'button'; b.className = 're-geo-item'; b.textContent = f.display_name;
+                b.addEventListener('click', function () { list.hidden = true; input.value = f.display_name; onPlace(parseFloat(f.lat), parseFloat(f.lon), f.display_name); });
+                list.appendChild(b);
+              });
+              list.hidden = !data || data.length === 0;
+            }).catch(function () { list.hidden = true; });
+        }, 350);
+      });
+      document.addEventListener('click', function (e) { if (e.target !== input && !input.contains(e.target)) list.hidden = true; });
+      return { search: function () { var first = list.querySelector('.re-geo-item'); if (first) first.click(); } };
+    }
     function loadGoogleMap(el) {
       if (window.google && window.google.maps) { wireProvider(new GoogleMapProvider(el)); return; }
       if (window.__reGoogleLoading) return;
@@ -838,11 +922,27 @@
       s.onload = create; s.async = true; s.defer = true;
       document.head.appendChild(s);
     }
+    function loadLeaflet(el) {
+      function create() { wireProvider(new LeafletProvider(el)); }
+      if (window.L) { create(); return; }
+      if (window.__reLeafletLoading) return;
+      window.__reLeafletLoading = true;
+      var l = document.createElement('link');
+      l.rel = 'stylesheet'; l.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(l);
+      var s = document.createElement('script');
+      s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      s.onload = create;
+      s.onerror = function () { wireProvider(new DemoProvider(el)); };
+      s.async = true; s.defer = true;
+      document.head.appendChild(s);
+    }
     function initProvider() {
       provider = pickProvider();
       var el = $('#re-map');
       if (provider === 'google') loadGoogleMap(el);
       else if (provider === 'mapbox') loadMapbox(el);
+      else if (provider === 'leaflet') loadLeaflet(el);
       else wireProvider(new DemoProvider(el));
       setDrawControls();
     }
